@@ -1,0 +1,6 @@
+@Gesterum.Deploy.Orchestrator.Api_HostAddress = http://localhost:5245
+
+GET {{Gesterum.Deploy.Orchestrator.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
