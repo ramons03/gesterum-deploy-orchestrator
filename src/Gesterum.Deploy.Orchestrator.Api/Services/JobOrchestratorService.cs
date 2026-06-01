@@ -12,28 +12,49 @@ public sealed class JobOrchestratorService
 {
     private readonly AppDbContext _db;
     private readonly JobQueueService _queue;
-    private readonly JobsOptions _opt;
+    private readonly JobsOptions _jobsOpt;
+    private readonly EnvironmentApprovalOptions _envOpt;
 
-    public JobOrchestratorService(AppDbContext db, JobQueueService queue, IOptions<JobsOptions> opt)
+    public JobOrchestratorService(
+        AppDbContext db,
+        JobQueueService queue,
+        IOptions<JobsOptions> jobsOpt,
+        IOptions<EnvironmentApprovalOptions> envOpt)
     {
         _db = db;
         _queue = queue;
-        _opt = opt.Value;
+        _jobsOpt = jobsOpt.Value;
+        _envOpt = envOpt.Value;
     }
 
     public async Task<DeployJob> EnqueueAsync(EnqueueJobRequest req, CancellationToken ct)
     {
         var requiresApproval = false;
-        if (_opt.RequireApprovalForDangerousActions && req.JobType.Equals("deploy.execute", StringComparison.OrdinalIgnoreCase))
+
+        if (req.JobType.Equals("deploy.execute", StringComparison.OrdinalIgnoreCase))
         {
+            ExecuteDeployRequest? parsed = null;
             try
             {
-                var parsed = JsonSerializer.Deserialize<ExecuteDeployRequest>(req.PayloadJson);
-                requiresApproval = parsed?.Dangerous == true;
+                parsed = JsonSerializer.Deserialize<ExecuteDeployRequest>(req.PayloadJson);
             }
             catch
             {
                 requiresApproval = true;
+            }
+
+            if (parsed is not null)
+            {
+                var env = parsed.Environment.ToLowerInvariant();
+                var envApproval = env switch
+                {
+                    "production" => _envOpt.RequireApprovalInProduction,
+                    "staging" => _envOpt.RequireApprovalInStaging,
+                    _ => false
+                };
+
+                var dangerousApproval = _jobsOpt.RequireApprovalForDangerousActions && parsed.Dangerous;
+                requiresApproval = requiresApproval || envApproval || dangerousApproval;
             }
         }
 

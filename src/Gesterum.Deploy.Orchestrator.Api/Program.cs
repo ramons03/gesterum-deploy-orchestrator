@@ -22,6 +22,7 @@ builder.Services.Configure<AwsOptions>(builder.Configuration.GetSection(AwsOptio
 builder.Services.Configure<NginxOptions>(builder.Configuration.GetSection(NginxOptions.SectionName));
 builder.Services.Configure<DeployTemplateOptions>(builder.Configuration.GetSection(DeployTemplateOptions.SectionName));
 builder.Services.Configure<JobsOptions>(builder.Configuration.GetSection(JobsOptions.SectionName));
+builder.Services.Configure<EnvironmentApprovalOptions>(builder.Configuration.GetSection(EnvironmentApprovalOptions.SectionName));
 
 var jobsDataSource = builder.Configuration[$"{JobsOptions.SectionName}:DataSource"] ?? "Data Source=data/orchestrator.db";
 builder.Services.AddDbContext<AppDbContext>(opt => opt.UseSqlite(jobsDataSource));
@@ -29,6 +30,7 @@ builder.Services.AddDbContext<AppDbContext>(opt => opt.UseSqlite(jobsDataSource)
 builder.Services.AddHttpClient<CloudflareService>();
 builder.Services.AddScoped<SqsService>();
 builder.Services.AddScoped<NginxService>();
+builder.Services.AddScoped<NginxVhostService>();
 builder.Services.AddScoped<DeployTemplateService>();
 builder.Services.AddScoped<DeployExecutorService>();
 builder.Services.AddScoped<JobOrchestratorService>();
@@ -81,6 +83,18 @@ app.MapPost("/api/aws/sqs", async (CreateSqsQueueRequest req, SqsService svc, Ca
 app.MapPost("/api/nginx", async (NginxCommandRequest req, NginxService svc, CancellationToken ct) =>
 {
     var res = await svc.ExecuteAsync(req, ct);
+    return res.Ok ? Results.Ok(res) : Results.BadRequest(res);
+}).RequireAuthorization();
+
+app.MapPost("/api/nginx/vhost", async (CreateNginxVhostRequest req, NginxVhostService svc, IOptions<DeployTemplateOptions> opt) =>
+{
+    var res = await svc.CreateOrUpdateAsync(req, opt.Value.DryRun);
+    return res.Ok ? Results.Ok(res) : Results.BadRequest(res);
+}).RequireAuthorization();
+
+app.MapPost("/api/nginx/vhost/rollback", async (RollbackNginxVhostRequest req, NginxVhostService svc, IOptions<DeployTemplateOptions> opt) =>
+{
+    var res = await svc.RollbackAsync(req, opt.Value.DryRun);
     return res.Ok ? Results.Ok(res) : Results.BadRequest(res);
 }).RequireAuthorization();
 

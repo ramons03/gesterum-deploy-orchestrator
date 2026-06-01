@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Net.Http;
 using System.Text.Json;
 using Gesterum.Deploy.Orchestrator.Api.Contracts;
 using Gesterum.Deploy.Orchestrator.Api.Models;
@@ -10,22 +11,25 @@ namespace Gesterum.Deploy.Orchestrator.Api.Services;
 public sealed class DeployExecutorService
 {
     private readonly DeployTemplateOptions _opt;
+    private readonly NginxVhostService _vhostService;
+    private readonly HttpClient _httpClient = new();
 
-    public DeployExecutorService(IOptions<DeployTemplateOptions> opt)
+    public DeployExecutorService(IOptions<DeployTemplateOptions> opt, NginxVhostService vhostService)
     {
         _opt = opt.Value;
+        _vhostService = vhostService;
     }
 
-    public Task<OperationResult> ExecuteAsync(DeployJob job, CancellationToken _)
+    public async Task<OperationResult> ExecuteAsync(DeployJob job, CancellationToken ct)
     {
         if (!job.JobType.Equals("deploy.execute", StringComparison.OrdinalIgnoreCase))
         {
-            return Task.FromResult(new OperationResult
+            return new OperationResult
             {
                 Ok = true,
                 Message = "job type ignored by executor",
                 Data = new { job.JobType }
-            });
+            };
         }
 
         ExecuteDeployRequest? req;
@@ -35,50 +39,111 @@ public sealed class DeployExecutorService
         }
         catch (Exception ex)
         {
-            return Task.FromResult(new OperationResult { Ok = false, Message = "invalid payload", Data = ex.Message });
+            return new OperationResult { Ok = false, Message = "invalid payload", Data = ex.Message };
         }
 
-        if (req is null || string.IsNullOrWhiteSpace(req.StartCommand))
-        {
-            return Task.FromResult(new OperationResult { Ok = false, Message = "invalid deploy request" });
-        }
+        if (req is null || string.IsNullOrWhiteSpace(req.StartCommand) || string.IsNullOrWhiteSpace(req.AppPath))
+            return new OperationResult { Ok = false, Message = "invalid deploy request" };
 
         if (_opt.DryRun)
         {
-            return Task.FromResult(new OperationResult
+            return new OperationResult
             {
                 Ok = true,
                 Message = "dry-run deploy execution",
                 Data = req
-            });
-        }
-
-        try
-        {
-            var psi = new ProcessStartInfo("/bin/sh", $"-lc \"cd {req.AppPath} && {req.StartCommand}\"")
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false
             };
-
-            using var proc = Process.Start(psi);
-            if (proc is null) return Task.FromResult(new OperationResult { Ok = false, Message = "failed to start process" });
-
-            var stdout = proc.StandardOutput.ReadToEnd();
-            var stderr = proc.StandardError.ReadToEnd();
-            proc.WaitForExit();
-
-            return Task.FromResult(new OperationResult
-            {
-                Ok = proc.ExitCode == 0,
-                Message = proc.ExitCode == 0 ? "deploy command finished" : "deploy command failed",
-                Data = new { proc.ExitCode, stdout, stderr }
-            });
         }
-        catch (Exception ex)
+
+        var outputs = new List<object>();
+
+        var buildCommand = ResolveBuildCommand(req);
+        if (!string.IsNullOrWhiteSpace(buildCommand))
         {
-            return Task.FromResult(new OperationResult { Ok = false, Message = ex.Message });
+            var buildRes = RunShell($"cd {req.AppPath} && {buildCommand}");
+            outputs.Add(new { step = "build", buildRes.code, buildRes.stdout, buildRes.stderr });
+            if (!buildRes.ok)
+                return new OperationResult { Ok = false, Message = "build failed", Data = outputs };
         }
+
+        var startRes = RunShell($"cd {req.AppPath} && {req.StartCommand}");
+        outputs.Add(new { step = "start", startRes.code, startRes.stdout, startRes.stderr });
+        if (!startRes.ok)
+            return new OperationResult { Ok = false, Message = "start command failed", Data = outputs };
+
+        if (req.CreateOrUpdateNginxVhost && !string.IsNullOrWhiteSpace(req.Domain) && req.Port.HasValue)
+        {
+            var vhostRes = await _vhostService.CreateOrUpdateAsync(new CreateNginxVhostRequest
+            {
+                Domain = req.Domain,
+                UpstreamPort = req.Port.Value,
+                EnableTlsRedirect = true
+            }, dryRun: false);
+
+            outputs.Add(new { step = "nginx-vhost", result = vhostRes });
+            if (!vhostRes.Ok)
+                return new OperationResult { Ok = false, Message = "nginx vhost failed", Data = outputs };
+        }
+
+        var healthOk = await WaitHealth(req.HealthUrl, req.HealthTimeoutSeconds, ct);
+        outputs.Add(new { step = "health", ok = healthOk, req.HealthUrl, req.HealthTimeoutSeconds });
+
+        if (!healthOk)
+            return new OperationResult { Ok = false, Message = "health check failed", Data = outputs };
+
+        return new OperationResult { Ok = true, Message = "deploy execution succeeded", Data = outputs };
+    }
+
+    private static string ResolveBuildCommand(ExecuteDeployRequest req)
+    {
+        if (!string.IsNullOrWhiteSpace(req.BuildCommand))
+            return req.BuildCommand;
+
+        return req.Runtime.ToLowerInvariant() switch
+        {
+            "dotnet" => "dotnet build -c Release",
+            "node" => "npm run build",
+            "python" => string.Empty,
+            _ => string.Empty
+        };
+    }
+
+    private async Task<bool> WaitHealth(string url, int timeoutSeconds, CancellationToken ct)
+    {
+        var start = DateTime.UtcNow;
+        while ((DateTime.UtcNow - start).TotalSeconds < timeoutSeconds)
+        {
+            try
+            {
+                using var res = await _httpClient.GetAsync(url, ct);
+                if (res.IsSuccessStatusCode)
+                    return true;
+            }
+            catch
+            {
+            }
+
+            await Task.Delay(1000, ct);
+        }
+
+        return false;
+    }
+
+    private static (bool ok, int code, string stdout, string stderr) RunShell(string command)
+    {
+        var psi = new ProcessStartInfo("/bin/sh", $"-lc \"{command}\"")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        };
+
+        using var p = Process.Start(psi);
+        if (p is null) return (false, -1, string.Empty, "failed to start process");
+
+        var stdout = p.StandardOutput.ReadToEnd();
+        var stderr = p.StandardError.ReadToEnd();
+        p.WaitForExit();
+        return (p.ExitCode == 0, p.ExitCode, stdout, stderr);
     }
 }
