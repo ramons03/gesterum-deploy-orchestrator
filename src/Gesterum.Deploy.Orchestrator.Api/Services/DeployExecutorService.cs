@@ -10,6 +10,31 @@ namespace Gesterum.Deploy.Orchestrator.Api.Services;
 
 public sealed class DeployExecutorService
 {
+    private static readonly HashSet<string> AllowedDotnetBuild = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "dotnet build -c Release",
+        "dotnet publish -c Release"
+    };
+
+    private static readonly HashSet<string> AllowedNodeBuild = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "npm run build",
+        "pnpm build"
+    };
+
+    private static readonly HashSet<string> AllowedNodeStart = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "npm run start",
+        "node server.js",
+        "pm2 restart all"
+    };
+
+    private static readonly HashSet<string> AllowedDotnetStart = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "./start.sh",
+        "dotnet run -c Release"
+    };
+
     private readonly DeployTemplateOptions _opt;
     private readonly NginxVhostService _vhostService;
     private readonly HttpClient _httpClient = new();
@@ -44,6 +69,10 @@ public sealed class DeployExecutorService
 
         if (req is null || string.IsNullOrWhiteSpace(req.StartCommand) || string.IsNullOrWhiteSpace(req.AppPath))
             return new OperationResult { Ok = false, Message = "invalid deploy request" };
+
+        var validation = ValidateCommands(req);
+        if (!validation.Ok)
+            return validation;
 
         if (_opt.DryRun)
         {
@@ -94,10 +123,45 @@ public sealed class DeployExecutorService
         return new OperationResult { Ok = true, Message = "deploy execution succeeded", Data = outputs };
     }
 
+    private static OperationResult ValidateCommands(ExecuteDeployRequest req)
+    {
+        var runtime = req.Runtime.ToLowerInvariant();
+        var build = ResolveBuildCommand(req);
+        var start = req.StartCommand.Trim();
+
+        var buildAllowed = runtime switch
+        {
+            "dotnet" => string.IsNullOrWhiteSpace(build) || AllowedDotnetBuild.Contains(build),
+            "node" => string.IsNullOrWhiteSpace(build) || AllowedNodeBuild.Contains(build),
+            "python" => string.IsNullOrWhiteSpace(build),
+            _ => false
+        };
+
+        var startAllowed = runtime switch
+        {
+            "dotnet" => AllowedDotnetStart.Contains(start),
+            "node" => AllowedNodeStart.Contains(start),
+            "python" => start.Equals("python3 app.py", StringComparison.OrdinalIgnoreCase) || start.Equals("uvicorn app:app --host 0.0.0.0 --port 8000", StringComparison.OrdinalIgnoreCase),
+            _ => false
+        };
+
+        if (!buildAllowed || !startAllowed)
+        {
+            return new OperationResult
+            {
+                Ok = false,
+                Message = "command not allowed by runtime policy",
+                Data = new { req.Runtime, build, start }
+            };
+        }
+
+        return new OperationResult { Ok = true, Message = "commands validated" };
+    }
+
     private static string ResolveBuildCommand(ExecuteDeployRequest req)
     {
         if (!string.IsNullOrWhiteSpace(req.BuildCommand))
-            return req.BuildCommand;
+            return req.BuildCommand.Trim();
 
         return req.Runtime.ToLowerInvariant() switch
         {

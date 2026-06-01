@@ -30,6 +30,8 @@ public sealed class JobOrchestratorService
     public async Task<DeployJob> EnqueueAsync(EnqueueJobRequest req, CancellationToken ct)
     {
         var requiresApproval = false;
+        string? environment = null;
+        string? runtime = null;
 
         if (req.JobType.Equals("deploy.execute", StringComparison.OrdinalIgnoreCase))
         {
@@ -45,6 +47,9 @@ public sealed class JobOrchestratorService
 
             if (parsed is not null)
             {
+                environment = parsed.Environment;
+                runtime = parsed.Runtime;
+
                 var env = parsed.Environment.ToLowerInvariant();
                 var envApproval = env switch
                 {
@@ -64,7 +69,10 @@ public sealed class JobOrchestratorService
             PayloadJson = req.PayloadJson,
             RequiresApproval = requiresApproval,
             Approved = !requiresApproval,
-            Status = requiresApproval ? "queued" : "approved"
+            Status = requiresApproval ? "queued" : "approved",
+            RequestedBy = string.IsNullOrWhiteSpace(req.RequestedBy) ? "system" : req.RequestedBy,
+            Environment = environment,
+            Runtime = runtime
         };
 
         _db.Jobs.Add(job);

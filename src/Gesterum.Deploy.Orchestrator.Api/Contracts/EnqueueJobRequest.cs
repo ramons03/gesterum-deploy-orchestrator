@@ -4,4 +4,5 @@ public sealed class EnqueueJobRequest
 {
     public string JobType { get; set; } = string.Empty;
     public string PayloadJson { get; set; } = "{}";
+    public string RequestedBy { get; set; } = "system";
 }

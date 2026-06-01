@@ -8,6 +8,9 @@ public sealed class DeployJob
     public string Status { get; set; } = "queued"; // queued|approved|running|succeeded|failed|rejected
     public bool RequiresApproval { get; set; }
     public bool Approved { get; set; }
+    public string? Environment { get; set; }
+    public string RequestedBy { get; set; } = "system";
+    public string? Runtime { get; set; }
     public string? ResultJson { get; set; }
     public string? Error { get; set; }
     public DateTime CreatedAtUtc { get; set; } = DateTime.UtcNow;

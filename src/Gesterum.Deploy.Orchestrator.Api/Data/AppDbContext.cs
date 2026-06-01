@@ -17,6 +17,9 @@ public sealed class AppDbContext : DbContext
             e.Property(x => x.JobType).HasMaxLength(100).IsRequired();
             e.Property(x => x.Status).HasMaxLength(40).IsRequired();
             e.Property(x => x.PayloadJson).IsRequired();
+            e.Property(x => x.RequestedBy).HasMaxLength(120).IsRequired();
+            e.Property(x => x.Environment).HasMaxLength(30);
+            e.Property(x => x.Runtime).HasMaxLength(30);
             e.HasIndex(x => x.Status);
             e.HasIndex(x => x.CreatedAtUtc);
         });
