@@ -1,8 +1,10 @@
 using Gesterum.Deploy.Orchestrator.Api.Contracts;
+using Gesterum.Deploy.Orchestrator.Api.Data;
 using Gesterum.Deploy.Orchestrator.Api.Models;
 using Gesterum.Deploy.Orchestrator.Api.Options;
 using Gesterum.Deploy.Orchestrator.Api.Services;
 using Microsoft.AspNetCore.Authentication;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Serilog;
 using System.Security.Claims;
@@ -19,11 +21,17 @@ builder.Services.Configure<CloudflareOptions>(builder.Configuration.GetSection(C
 builder.Services.Configure<AwsOptions>(builder.Configuration.GetSection(AwsOptions.SectionName));
 builder.Services.Configure<NginxOptions>(builder.Configuration.GetSection(NginxOptions.SectionName));
 builder.Services.Configure<DeployTemplateOptions>(builder.Configuration.GetSection(DeployTemplateOptions.SectionName));
+builder.Services.Configure<JobsOptions>(builder.Configuration.GetSection(JobsOptions.SectionName));
+
+var jobsDataSource = builder.Configuration[$"{JobsOptions.SectionName}:DataSource"] ?? "Data Source=data/orchestrator.db";
+builder.Services.AddDbContext<AppDbContext>(opt => opt.UseSqlite(jobsDataSource));
 
 builder.Services.AddHttpClient<CloudflareService>();
 builder.Services.AddScoped<SqsService>();
 builder.Services.AddScoped<NginxService>();
 builder.Services.AddScoped<DeployTemplateService>();
+builder.Services.AddScoped<DeployExecutorService>();
+builder.Services.AddScoped<JobOrchestratorService>();
 
 builder.Services.AddSingleton<JobQueueService>();
 builder.Services.AddHostedService<JobWorker>();
@@ -36,6 +44,12 @@ builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 var app = builder.Build();
+
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    db.Database.EnsureCreated();
+}
 
 app.UseSerilogRequestLogging();
 app.UseSwagger();
@@ -79,14 +93,31 @@ app.MapPost("/api/deploy/template", async (DeployTemplateRequest req, DeployTemp
     return Results.Ok(res);
 }).RequireAuthorization();
 
-app.MapPost("/api/jobs/enqueue", async (EnqueueJobRequest req, JobQueueService queue, CancellationToken ct) =>
+app.MapPost("/api/jobs/enqueue", async (EnqueueJobRequest req, JobOrchestratorService orchestrator, CancellationToken ct) =>
 {
     if (string.IsNullOrWhiteSpace(req.JobType))
         return Results.BadRequest(new { error = "jobType requerido" });
 
-    var job = new DeployJob { JobType = req.JobType, PayloadJson = req.PayloadJson };
-    await queue.EnqueueAsync(job, ct);
+    var job = await orchestrator.EnqueueAsync(req, ct);
     return Results.Ok(new OperationResult { Ok = true, Message = "job enqueued", Data = job });
+}).RequireAuthorization();
+
+app.MapGet("/api/jobs", async (JobOrchestratorService orchestrator, CancellationToken ct) =>
+{
+    var jobs = await orchestrator.ListAsync(ct);
+    return Results.Ok(jobs);
+}).RequireAuthorization();
+
+app.MapGet("/api/jobs/{id:guid}", async (Guid id, JobOrchestratorService orchestrator, CancellationToken ct) =>
+{
+    var job = await orchestrator.GetAsync(id, ct);
+    return job is null ? Results.NotFound() : Results.Ok(job);
+}).RequireAuthorization();
+
+app.MapPost("/api/jobs/{id:guid}/approval", async (Guid id, ApproveJobRequest req, JobOrchestratorService orchestrator, CancellationToken ct) =>
+{
+    var job = await orchestrator.ApproveAsync(id, req.Approve, ct);
+    return job is null ? Results.NotFound() : Results.Ok(job);
 }).RequireAuthorization();
 
 app.Run();

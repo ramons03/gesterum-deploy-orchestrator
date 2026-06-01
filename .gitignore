@@ -4,3 +4,4 @@
 *.user
 *.suo
 .env
+src/Gesterum.Deploy.Orchestrator.Api/data/
